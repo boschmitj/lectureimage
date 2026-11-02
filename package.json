@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "jspdf": "^4.2.1",
+    "onnxruntime-web": "^1.31.1"
+  }
+}

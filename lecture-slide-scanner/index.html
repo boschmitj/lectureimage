@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>correctified</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/src/style.css">
+
+  <script>
+    var Module = {
+      onRuntimeInitialized() {
+        console.log("OpenCV loaded successfully");
+        window.dispatchEvent(new Event("opencv-ready"))
+      }
+    };
+  </script>
+
+  <script async src="/opencv.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="title">correctified</div>
+      <button class="btn-settings" id="btnSettings" aria-label="Open settings">&#9881;</button>
+    </header>
+
+    <main class="main">
+      <div class="drop-zone" id="dropZone">
+        <div class="dz-icon">&#128247;</div>
+        <p>Drop images, PDFs, or a folder here, or click to select</p>
+        <input type="file" id="fileInput" multiple hidden accept="image/*,application/pdf,.pdf">
+        <p class="dz-hint">Every page in each PDF is processed in order</p>
+      </div>
+
+      <div class="file-list" id="fileList"></div>
+
+      <div class="progress-panel" id="progressPanel" hidden aria-live="polite">
+        <div class="progress-heading">
+          <span id="progressLabel">Preparing files</span>
+          <span id="progressValue"></span>
+        </div>
+        <progress id="progressBar" max="1" value="0" aria-labelledby="progressLabel"></progress>
+      </div>
+
+      <div class="actions">
+        <button class="btn-redo" id="btnRedo" disabled title="Re-process all images with current settings">&#8635;</button>
+        <button class="btn-primary" id="btnPdf" disabled>Generate PDF</button>
+      </div>
+    </main>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span>Settings</span>
+        <button class="btn-close" id="btnCloseSidebar" aria-label="Close settings">&#215;</button>
+      </div>
+      <div class="settings-content">
+        <div class="settings-grid">
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Output width</span>
+              <span class="setting-value" id="v-outputWidth">1280</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-outputWidth" min="256" max="2048" value="1280">
+              <input type="number" id="n-outputWidth" min="256" max="2048" value="1280">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Output height</span>
+              <span class="setting-value" id="v-outputHeight">720</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-outputHeight" min="256" max="2048" value="720">
+              <input type="number" id="n-outputHeight" min="256" max="2048" value="720">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Canny low</span>
+              <span class="setting-value" id="v-cannyLow">50</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-cannyLow" min="0" max="255" value="50">
+              <input type="number" id="n-cannyLow" min="0" max="255" value="50">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Canny high</span>
+              <span class="setting-value" id="v-cannyHigh">100</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-cannyHigh" min="0" max="255" value="100">
+              <input type="number" id="n-cannyHigh" min="0" max="255" value="100">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Min contour area (%)</span>
+              <span class="setting-value" id="v-minAreaFrac">1</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-minAreaFrac" min="0" max="100" step="0.1" value="1">
+              <input type="number" id="n-minAreaFrac" min="0" max="100" step="0.1" value="1">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">CLAHE clip limit</span>
+              <span class="setting-value" id="v-claheClipLimit">2</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-claheClipLimit" min="1" max="10" step="0.1" value="1.5">
+              <input type="number" id="n-claheClipLimit" min="1" max="10" step="0.1" value="1.5">
+            </div>
+          </div>
+          <div class="setting">
+            <div class="setting-header">
+              <span class="setting-label">Sharpen strength</span>
+              <span class="setting-value" id="v-sharpenStrength">1.5</span>
+            </div>
+            <div class="setting-controls">
+              <input type="range" id="p-sharpenStrength" min="0" max="5" step="0.1" value="0.5">
+              <input type="number" id="n-sharpenStrength" min="0" max="5" step="0.1" value="0.5">
+            </div>
+          </div>
+        </div>
+
+        <div class="toggles">
+          <label class="toggle">
+            <input type="checkbox" id="p-colorCorrection">
+            <span>Color correction</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="p-clahe">
+            <span>CLAHE contrast</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="p-sharpen" checked>
+            <span>Unsharp sharpen</span>
+          </label>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="btn-secondary" id="btnReset">Reset defaults</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="sidebar-backdrop" id="backdrop"></div>
+  </div>
+
+  <!-- Before/After modal -->
+  <div class="modal" id="compareModal">
+    <div class="modal-backdrop" id="modalBackdrop"></div>
+    <div class="modal-panel">
+      <button class="modal-close" id="modalClose">&times;</button>
+      <div class="modal-header">
+        <span class="modal-title">Before &#8594; After</span>
+        <span class="modal-filename" id="modalFilename"></span>
+        <button class="modal-edit-corners" id="modalEditCorners" title="Edit slide corners">&#9998;</button>
+      </div>
+      <div class="modal-pair">
+        <div class="modal-side">
+          <div class="modal-side-label">Original</div>
+          <div class="modal-side-thumb">
+            <img id="modalOriginal" alt="Original">
+          </div>
+        </div>
+        <div class="modal-side">
+          <div class="modal-side-label">Processed</div>
+          <div class="modal-side-thumb">
+            <img id="modalProcessed" alt="Processed">
+          </div>
+        </div>
+      </div>
+
+      <!-- Corner cropper panel (shown when editing corners) -->
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
