@@ -6,21 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>correctified</title>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
-
   <link rel="stylesheet" href="/src/style.css">
 
-  <script>
-    var Module = {
-      onRuntimeInitialized() {
-        console.log("OpenCV loaded successfully");
-        window.dispatchEvent(new Event("opencv-ready"))
-      }
-    };
-  </script>
-
+  <script src="/opencv-config.js"></script>
   <script async src="/opencv.js"></script>
 </head>
 <body>

@@ -176,7 +176,7 @@ function selectImageCorners(image) {
             flex-direction: column;
             align-items: center;
             gap: 12px;
-            font-family: ${getComputedStyle(document.documentElement).fontFamily || 'Geist, sans-serif'};
+            font-family: inherit;
         ">
             <p style="margin:0; color:#201335; font-weight:600">Drag the four points to the slide corners.</p>
             <canvas style="
@@ -368,12 +368,6 @@ async function reprocessJobWithCorners(job) {
 // File list rendering
 // ---------------------------------------------------------------------------
 
-function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
 function statusLabel(status) {
   const map = {
     pending: "pending",
@@ -411,16 +405,22 @@ function renderList() {
 
     const status = document.createElement("div");
     status.className = "file-status";
-    status.innerHTML = `<span>${escapeHtml(statusLabel(job.status))}</span>${
-      job.error ? `<span style="color:#fca5a5">!</span>` : ""
-    }`;
+    const statusText = document.createElement("span");
+    statusText.textContent = statusLabel(job.status);
+    status.appendChild(statusText);
+    if (job.error) {
+      const errorMarker = document.createElement("span");
+      errorMarker.style.color = "#fca5a5";
+      errorMarker.textContent = "!";
+      status.appendChild(errorMarker);
+    }
 
     const info = document.createElement("div");
     info.className = "file-info";
 
     const name = document.createElement("div");
     name.className = "file-name";
-    name.textContent = escapeHtml(job.label || job.file.name);
+    name.textContent = job.label || job.file.name;
 
     const meta = document.createElement("div");
     meta.className = "file-meta";
