@@ -1,0 +1,20 @@
+{
+	"mcpServers": {
+		"blender": {
+			"type": "stdio",
+			"command": "/home/josh/.local/bin/uvx",
+			"args": [
+				"--python",
+				"3.11",
+				"blender-mcp"
+			],
+			"tools": [
+				"*"
+			],
+			"env": {
+				"UV_PYTHON_PREFERENCE": "only-managed",
+				"DISABLE_TELEMETRY": "true"
+			}
+		}
+	}
+}
