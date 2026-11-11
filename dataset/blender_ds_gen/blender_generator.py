@@ -35,6 +35,9 @@ DEFAULT_HUMAN_MODEL = Path(
 
 @dataclass
 class GeneratorConfig:
+    """All dataset-generation parameters: slide source, output directory, environment selection,
+    human model, camera/human placement limits, render settings, split ratios, and degradation flags.
+    Built from CLI args by _parse_args and validated by validate() before any Blender work begins."""
     slide_source_dir: Path = DEFAULT_SLIDE_SOURCE_DIR
     output_dir: Path = Path("dataset")
     environment_dir: Path | None = None
@@ -65,6 +68,9 @@ class GeneratorConfig:
     degradation_probability: float = 0.35
 
     def validate(self) -> None:
+        """Checks configuration consistency: non-negative samples, positive resolution, split ratios
+        summing to 1, mutually exclusive environment options, valid camera/human limits, and supported
+        render engines. Raises ValueError on invalid input so failures surface before rendering."""
         if self.samples < 0 or self.width <= 0 or self.height <= 0:
             raise ValueError("samples must be non-negative and resolution must be positive")
         if abs(self.train_ratio + self.val_ratio + self.test_ratio - 1.0) > 1e-9:
@@ -89,6 +95,9 @@ class GeneratorConfig:
 
 @dataclass
 class Surface:
+    """Describes a detected whiteboard face: 3D center, outward normal, U/V in-plane axes, width and
+    height in meters, and the source Blender object. Defines the board frame used to place slides,
+    humans, and cameras."""
     center: Any
     normal: Any
     u: Any
@@ -100,6 +109,9 @@ class Surface:
 
 @dataclass
 class RuntimeState:
+    """Bundles per-run mutable state: config, RNG, source root, environment path, and references plus
+    metadata for the whiteboard, surface, placed slide, humans, camera, and materials. Shared by
+    placement helpers so each sample uses one deterministic RNG."""
     config: GeneratorConfig
     rng: random.Random
     source_root: Path
@@ -115,6 +127,8 @@ class RuntimeState:
 
 
 def _require_blender() -> tuple[Any, Any, Any]:
+    """Imports bpy, mathutils, and world_to_camera_view, raising a clear error outside Blender's Python
+    interpreter. Isolates Blender dependencies to a single point so the module stays import-safe elsewhere."""
     try:
         import bpy
         from bpy_extras.object_utils import world_to_camera_view
@@ -125,10 +139,14 @@ def _require_blender() -> tuple[Any, Any, Any]:
 
 
 def _vec(value: Any) -> list[float]:
+    """Converts a mathutils Vector (or similar sequence) to a plain list of floats rounded to 6
+    decimals, for JSON-serializing 3D positions, corners, and camera data in annotations."""
     return [round(float(component), 6) for component in value]
 
 
 def _world_bounds(obj: Any, Vector: Any) -> tuple[Any, Any]:
+    """Computes one Blender object's axis-aligned bounding box in world space by transforming its
+    local bound_box corners with matrix_world. Returns (min, max) vectors."""
     points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
     return (
         Vector((min(point[i] for point in points) for i in range(3))),
@@ -137,6 +155,8 @@ def _world_bounds(obj: Any, Vector: Any) -> tuple[Any, Any]:
 
 
 def _bounds_center(objects: Iterable[Any], Vector: Any) -> tuple[Any, Any]:
+    """Computes the center and size of the combined bounding box of all mesh objects. Used to find the
+    room center and dimensions for clamping camera and human positions inside the environment."""
     bounds = [_world_bounds(obj, Vector) for obj in objects if obj.type == "MESH" and obj.bound_box]
     if not bounds:
         return Vector((0, 0, 0)), Vector((0, 0, 0))
@@ -146,7 +166,9 @@ def _bounds_center(objects: Iterable[Any], Vector: Any) -> tuple[Any, Any]:
 
 
 def discover_environments(config: GeneratorConfig, bpy: Any) -> list[Path]:
-    """Return explicit environment files, or the currently opened file."""
+    """Resolves the .blend environment(s) to render: an explicit --environment-file, all .blend files
+    under --environment-dir, or the currently opened Blender file as a fallback. Validates existence and
+    returns a sorted list of blend paths."""
 
     if config.environment_file:
         path = config.environment_file.expanduser().resolve()
@@ -168,6 +190,9 @@ def discover_environments(config: GeneratorConfig, bpy: Any) -> list[Path]:
 
 
 def _find_whiteboard(bpy: Any, Vector: Any, requested: str | None) -> Any:
+    """Locates the whiteboard mesh: honors --whiteboard-name if given, otherwise picks the largest mesh
+    named whiteboard/blackboard/projection/screen, falling back to the largest vertical, polygon-bearing
+    mesh under 30 m. Raises ValueError if no suitable board is found."""
     meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
     if requested:
         found = bpy.data.objects.get(requested)
@@ -195,6 +220,9 @@ def _find_whiteboard(bpy: Any, Vector: Any, requested: str | None) -> Any:
 
 
 def _environment_surface_reference(environment: Path, requested: str | None) -> tuple[str | None, float | None]:
+    """Maps a known environment filename/stem to a preferred whiteboard object name and optional max slide
+    width (e.g. the lecture-hall screen). Returns (None, None) for unknown environments so detection falls
+    back to generic heuristics."""
     if requested:
         return requested, None
     environment_id = str(environment).lower()
@@ -208,6 +236,9 @@ def _environment_surface_reference(environment: Path, requested: str | None) -> 
 
 
 def _surface_for_object(obj: Any, Vector, room_center: Any) -> Surface:
+    """Finds the largest vertical polygon of a whiteboard object and builds a Surface: centroid as center,
+    outward normal flipped toward the room, U along the longest edge, V perpendicular, and width/height
+    extents. Defines the board's placement frame."""
     transform = obj.matrix_world.to_3x3()
     best: tuple[float, Any] | None = None
     for polygon in obj.data.polygons:
@@ -235,6 +266,8 @@ def _surface_for_object(obj: Any, Vector, room_center: Any) -> Surface:
 
 
 def _slide_material(bpy: Any, image_path: Path) -> Any:
+    """Creates (or reuses) an emissive 'GeneratedSlideMaterial' with an image-texture node loaded from
+    image_path. Emission makes the slide render like a lit projection regardless of scene lighting."""
     image = bpy.data.images.load(str(image_path), check_existing=True)
     material = bpy.data.materials.get("GeneratedSlideMaterial") or bpy.data.materials.new("GeneratedSlideMaterial")
     material.use_nodes = True
@@ -259,7 +292,9 @@ def place_slide_on_whiteboard(
     rng: random.Random,
     max_width: float | None = None,
 ) -> tuple[Any, list[Any]]:
-    """Create one image plane on the detected board face and return its corners."""
+    """Creates a rectangular image plane sized to fit the board face (96% margin, aspect-preserving,
+    capped by max_width), offsets it 6 mm along the normal, assigns the slide emissive material, links
+    it to the scene, and returns the slide object and its four world-space corners."""
 
     image = bpy.data.images.load(str(image_path), check_existing=True)
     image_width, image_height = image.size
@@ -290,6 +325,9 @@ def place_slide_on_whiteboard(
 
 
 def _append_human(bpy: Any, Vector: Any, path: Path) -> list[Any]:
+    """Loads the human body .blend library (trying alternate layouts if the path is missing), unlinks
+    Camera/Light, links remaining objects into the scene, tags them generated_human, and returns the
+    imported mesh objects."""
     path = path.expanduser()
     if not path.is_file():
         alternatives = (
@@ -320,6 +358,10 @@ def _append_human(bpy: Any, Vector: Any, path: Path) -> list[Any]:
 def _place_human(
     bpy: Any, Vector: Any, Matrix: Any, state: RuntimeState, room_center: Any, room_size: Any
 ) -> None:
+    """Scales the human to fit room height, then samples up to 64 random poses: rotation around the board
+    normal, lateral offset, and distance in front of the board, with floor snapping and minimum-distance
+    correction. Stores location, rotation_z, and distance_to_whiteboard in state.human_metadata, or raises
+    if no valid placement is found."""
     objects = state.human_objects
     center, _ = _bounds_center(objects, Vector)
     _, human_size = _bounds_center(objects, Vector)
@@ -370,6 +412,8 @@ def _place_human(
 
 
 def _bbox_points(objects: Iterable[Any], Vector: Any) -> list[Any]:
+    """Gathers all world-space bounding-box corners of the given mesh objects, used for bounds and
+    ray-cast computations around placed humans and slides."""
     points: list[Any] = []
     for obj in objects:
         if obj.type == "MESH" and obj.bound_box:
@@ -378,6 +422,8 @@ def _bbox_points(objects: Iterable[Any], Vector: Any) -> list[Any]:
 
 
 def _combined_bounds(objects: Iterable[Any], Vector: Any) -> tuple[Any, Any]:
+    """Returns the (min, max) world-space bounding box of all points from the given objects, or zero
+    vectors when there are none."""
     points = _bbox_points(objects, Vector)
     if not points:
         return Vector(), Vector()
@@ -388,6 +434,9 @@ def _combined_bounds(objects: Iterable[Any], Vector: Any) -> tuple[Any, Any]:
 
 
 def _randomize_materials(bpy: Any, rng: random.Random, excluded: set[str]) -> dict[str, Any]:
+    """Slightly randomizes Roughness and Base Color of every non-excluded Principled BSDF material
+    (±10% jitter), skipping materials without nodes. Returns a metadata dict of changes for the
+    annotation file."""
     metadata: dict[str, Any] = {}
     for material in bpy.data.materials:
         if material.name in excluded or not material.use_nodes:
@@ -412,6 +461,10 @@ def _randomize_materials(bpy: Any, rng: random.Random, excluded: set[str]) -> di
 
 
 def _configure_camera(bpy: Any, Vector: Any, state: RuntimeState, room_center: Any, room_size: Any) -> Any:
+    """Creates or reuses a scene camera, then samples up to camera_max_attempts random positions in front
+    of the board at valid distances/heights inside the room. Looks at a jittered board point, sets focal
+    length, and validates via _camera_geometry_valid. Records camera metadata, or raises if no valid
+    placement is found."""
     from mathutils import Euler
 
     cameras = [obj for obj in bpy.data.objects if obj.type == "CAMERA"]
@@ -481,6 +534,9 @@ def _camera_geometry_valid(
     room_min: Any,
     room_max: Any,
 ) -> bool:
+    """Rejects camera positions outside the room or behind the board, ray-casts toward the slide center to
+    detect occluders closer than 0.1 m, and requires all four slide corners to project inside the frame
+    with positive depth. Returns True only for an unobstructed, fully-in-frame view of the slide."""
     position = camera.matrix_world.translation
     if any(position[i] <= room_min[i] + 0.1 or position[i] >= room_max[i] - 0.1 for i in range(3)):
         return False
@@ -510,6 +566,8 @@ def _camera_geometry_valid(
 
 
 def _projected_points(scene: Any, camera: Any, corners: list[Any], width: int, height: int, project: Any) -> list[tuple[float, float, float]]:
+    """Projects each slide corner through world_to_camera_view (or a supplied project callable) into pixel
+    coordinates (x, y, depth) at the given resolution."""
     return [
         (float(normalized.x * width), float((1 - normalized.y) * height), float(normalized.z))
         for normalized in (project(scene, camera, corner) for corner in corners)
@@ -517,6 +575,8 @@ def _projected_points(scene: Any, camera: Any, corners: list[Any], width: int, h
 
 
 def _projected_area_ratio(bpy: Any, camera: Any, corners: list[Any], width: int, height: int) -> float:
+    """Computes the 2D projected quad area of the slide corners divided by image area, quantifying how much
+    of the frame the slide occupies."""
     from bpy_extras.object_utils import world_to_camera_view
     points = _projected_points(bpy.context.scene, camera, corners, width, height, world_to_camera_view)
     area = abs(sum(points[index][0] * points[(index + 1) % 4][1] - points[(index + 1) % 4][0] * points[index][1] for index in range(4))) / 2
@@ -524,6 +584,9 @@ def _projected_area_ratio(bpy: Any, camera: Any, corners: list[Any], width: int,
 
 
 def _project_annotations(bpy: Any, camera: Any, corners: list[Any], width: int, height: int) -> dict[str, Any]:
+    """Projects slide corners to pixel coordinates, ray-casts slightly inside each corner to test visibility
+    against the GeneratedSlide mesh, and returns corner pixels, visibility flags, fully_in_frame, and
+    slide_area_ratio for the annotation JSON."""
     from bpy_extras.object_utils import world_to_camera_view
     names = ("top_left", "top_right", "bottom_right", "bottom_left")
     points = _projected_points(bpy.context.scene, camera, corners, width, height, world_to_camera_view)
@@ -553,6 +616,8 @@ def _project_annotations(bpy: Any, camera: Any, corners: list[Any], width: int, 
 
 
 def _missing_texture_paths(bpy: Any) -> list[str]:
+    """Scans bpy.data.images for file-sourced images whose resolved paths no longer exist on disk, returning
+    sorted missing paths for annotation and reporting."""
     missing: set[str] = set()
     for image in bpy.data.images:
         if image.source == "FILE" and image.filepath and not Path(bpy.path.abspath(image.filepath)).is_file():
@@ -561,6 +626,9 @@ def _missing_texture_paths(bpy: Any) -> list[str]:
 
 
 def _degrade(path: Path, rng: random.Random, probability: float) -> None:
+    """With probability `probability`, applies mild degradation to the rendered PNG: optional Gaussian blur,
+    contrast/brightness jitter, and quality-82-98 re-save. Silently no-ops if Pillow is missing or the draw
+    is skipped."""
     if rng.random() >= probability:
         return
     try:
@@ -577,6 +645,9 @@ def _degrade(path: Path, rng: random.Random, probability: float) -> None:
 
 
 def _set_render_settings(scene: Any, config: GeneratorConfig) -> None:
+    """Configures the Blender scene for rendering: selects an available engine, sets PNG RGB output at the
+    configured resolution, sample counts, and simplification (subdivision, particles, AO, texture limit, EEVEE
+    NEXT TAA samples). Call once per environment load."""
     available = {item.identifier for item in scene.bl_rna.properties["render"].fixed_type.properties["engine"].enum_items}
     for engine in (config.render_engine, "BLENDER_EEVEE_NEXT", "BLENDER_EEVEE", scene.render.engine):
         if engine in available:
@@ -605,6 +676,8 @@ def _set_render_settings(scene: Any, config: GeneratorConfig) -> None:
 
 
 def _remove_generated_sample_objects(bpy: Any) -> None:
+    """Deletes objects named GeneratedSlide or tagged generated_human from the scene so each sample starts
+    from a clean environment."""
     generated = [
         obj for obj in bpy.data.objects
         if obj.name == "GeneratedSlide" or obj.get("generated_human", False)
@@ -618,6 +691,9 @@ def _environment_assignments(
     environments: list[Path],
     seed: int,
 ) -> dict[Path, list[tuple[int, Any, int]]]:
+    """Deterministically assigns each sampled slide to an environment using a seeded RNG (one per-sample
+    seed), returning environment -> [(sample_index, slide, sample_seed)]. Ensures reproducible environment
+    rotation across samples."""
     assignments = {environment: [] for environment in environments}
     rng = random.Random(seed)
     for sample_index, slide in enumerate(selected, start=1):
@@ -628,7 +704,8 @@ def _environment_assignments(
 
 
 def create_placeholder_slides(directory: Path, count: int = 12, seed: int = 12345) -> list[Path]:
-    """Create fallback images only when the configured slide source is empty."""
+    """Generates count simple lecture-slide placeholder PNGs (title bar, bullet lines) when the configured
+    slide source is empty, so the pipeline can run end-to-end without real slides. Requires Pillow."""
 
     try:
         from PIL import Image, ImageDraw
@@ -653,6 +730,11 @@ def create_placeholder_slides(directory: Path, count: int = 12, seed: int = 1234
 
 
 def generate_dataset(config: GeneratorConfig) -> None:
+    """Top-level pipeline: validates config, loads Blender, discovers or creates slides, splits by deck,
+    samples slides, and assigns environments. Per environment it loads the blend, finds the board and
+    surface, then for each sample places slide + human + materials + camera, renders to images/<split>,
+    projects annotations, applies degradation, and writes per-split annotation JSON plus generation_config
+    metadata."""
     config.validate()
     bpy, Vector, (Matrix, _) = _require_blender()
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -765,6 +847,8 @@ def generate_dataset(config: GeneratorConfig) -> None:
 
 
 def _parse_args(argv: Iterable[str]) -> GeneratorConfig:
+    """Parses CLI arguments into a GeneratorConfig, mapping --no-render-simplify/--no-degradation flags to
+    their negated booleans. Designed for Blender's command line, where user arguments follow --."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--slide-source-dir", type=Path, default=DEFAULT_SLIDE_SOURCE_DIR)
     parser.add_argument("--environment-dir", type=Path)
@@ -812,5 +896,7 @@ def _parse_args(argv: Iterable[str]) -> GeneratorConfig:
 
 
 if __name__ == "__main__":
+    """CLI entry point: strips arguments before '--' (Blender convention) and runs generate_dataset with
+    the parsed config."""
     arguments = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else sys.argv[1:]
     generate_dataset(_parse_args(arguments))
