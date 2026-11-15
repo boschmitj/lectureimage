@@ -32,6 +32,18 @@ DEFAULT_HUMAN_MODEL = Path(
     "/home/josh/Documents/Datasets/slide_dataset/models/Human+body/Human/humanbody.blend"
 )
 
+@dataclass
+class EnvironmentConfig:
+    pass
+
+@dataclass
+class UniversityLectureHallConfig(EnvironmentConfig):
+    # no change in y direction
+    background_max_x = 3.9
+    background_max_z = 0.759
+    camera_max_y = 8
+    camera_max_x = 13.5
+    slide_points_positive_y = True
 
 @dataclass
 class GeneratorConfig:
@@ -66,6 +78,10 @@ class GeneratorConfig:
     texture_limit: int = 2048
     enable_degradation: bool = True
     degradation_probability: float = 0.35
+    proj_screen_name = "ProjectionScreen"
+    slide_node_name = "SlideTexture"
+    slide_node_label = "SlideTexture"
+    camera_name = "DatasetCamera"
 
     def validate(self) -> None:
         """Checks configuration consistency: non-negative samples, positive resolution, split ratios
@@ -188,7 +204,7 @@ def discover_environments(config: GeneratorConfig, bpy: Any) -> list[Path]:
         return [current]
     raise ValueError("Provide --environment-dir or --environment-file, or run with a .blend file")
 
-
+# TODO: This will be very much simplified after giving requested a default value and creating a unique mesh in the scene for each env
 def _find_whiteboard(bpy: Any, Vector: Any, requested: str | None) -> Any:
     """Locates the whiteboard mesh: honors --whiteboard-name if given, otherwise picks the largest mesh
     named whiteboard/blackboard/projection/screen, falling back to the largest vertical, polygon-bearing
@@ -218,7 +234,7 @@ def _find_whiteboard(bpy: Any, Vector: Any, requested: str | None) -> Any:
         raise ValueError("Could not detect a vertical planar whiteboard; use --whiteboard-name")
     return max(candidates, key=lambda item: item[0])[1]
 
-
+# TODO: align the whiteboad plane names
 def _environment_surface_reference(environment: Path, requested: str | None) -> tuple[str | None, float | None]:
     """Maps a known environment filename/stem to a preferred whiteboard object name and optional max slide
     width (e.g. the lecture-hall screen). Returns (None, None) for unknown environments so detection falls
@@ -282,6 +298,47 @@ def _slide_material(bpy: Any, image_path: Path) -> Any:
     links.new(texture.outputs["Color"], emission.inputs["Color"])
     links.new(emission.outputs["Emission"], output.inputs["Surface"])
     return material
+
+def place_slide_on_image(bpy: Any, image_path: Path, material_name: str) -> Any:
+    material = bpy.data.materials[material_name]
+
+    image_node = next(
+        node for node in material.node_tree.nodes
+        if node.type == "TEX_IMAGE"
+    )
+
+    image = bpy.data.images.load(
+        image_path,
+        check_existing=True
+    )
+
+    image_node.image = image
+
+def randomize_camera():
+    randomize_camera_pos()
+    randomize_camera_specs()
+    adjust_camera_angle()
+
+    
+def randomize_camera_pos():
+    pass
+
+def randomize_camera_specs():
+    pass
+
+def adjust_camera_angle():
+    pass
+
+def randomize_slide():
+    pass
+
+import numpy as np
+def randomize_slide_pos(slide_obj, offset_x, offset_z):
+    # First, find slide position:
+    slide_x = 0
+    slide_z = 0
+    # Then, randomize x offset and y offset
+    
 
 
 def place_slide_on_whiteboard(
