@@ -46,6 +46,14 @@ class UniversityLectureHallConfig(EnvironmentConfig):
     slide_points_positive_y = True
 
 @dataclass
+class CameraConfig:
+    width: int = 1920
+    height: int = 1080
+    camera_min_focal_length: float = 24.0
+    camera_max_focal_length: float = 50.0
+    camera_max_attempts: int = 80 
+
+@dataclass
 class GeneratorConfig:
     """All dataset-generation parameters: slide source, output directory, environment selection,
     human model, camera/human placement limits, render settings, split ratios, and degradation flags.
@@ -148,10 +156,10 @@ def _require_blender() -> tuple[Any, Any, Any]:
     try:
         import bpy
         from bpy_extras.object_utils import world_to_camera_view
-        from mathutils import Matrix, Vector
+        from mathutils import Matrix, Vector, Euler
     except ImportError as exc:
         raise RuntimeError("Run scene generation with Blender's Python interpreter") from exc
-    return bpy, Vector, (Matrix, world_to_camera_view)
+    return bpy, Vector, Euler, (Matrix, world_to_camera_view)
 
 
 def _vec(value: Any) -> list[float]:
@@ -299,14 +307,16 @@ def _slide_material(bpy: Any, image_path: Path) -> Any:
     links.new(emission.outputs["Emission"], output.inputs["Surface"])
     return material
 
-def place_slide_on_image(bpy: Any, image_path: Path, material_name: str) -> Any:
-    material = bpy.data.materials[material_name]
+# TODO add emission in the environment, randomize it?
+def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str) -> Any:
+
+    projection_plane = bpy.data.objects.get(projection_screen_name)
+    material = projection_plane.active_material
 
     image_node = next(
         node for node in material.node_tree.nodes
         if node.type == "TEX_IMAGE"
     )
-
     image = bpy.data.images.load(
         image_path,
         check_existing=True
@@ -314,32 +324,148 @@ def place_slide_on_image(bpy: Any, image_path: Path, material_name: str) -> Any:
 
     image_node.image = image
 
-def randomize_camera():
-    randomize_camera_pos()
-    randomize_camera_specs()
-    adjust_camera_angle()
+
+def randomize_camera(bpy: Any, Vector: Any, Euler: Any, camera_config: CameraConfig, projection_screen_name: str, camera_name: str, camera_max_x, camera_max_y, screen_points_pos_y):
+
+    camera = bpy.data.objects.get(camera_name)
+    # Use scene camera as fallback
+    if camera is None:
+        camera = bpy.context.scene.camera
+
+    projection_screen = bpy.data.objects.get(projection_screen_name)
+
+    randomize_camera_pos(Vector, camera, camera_max_x, camera_max_y)
+    randomize_camera_specs(camera, camera_config)
+    adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y)
+    randomize_camera_rotation(Vector, Euler, camera, )
 
     
-def randomize_camera_pos():
-    pass
+def randomize_camera_pos(Vector, camera, camera_max_x, camera_max_y):
+    default_camera_pos = camera.location
+    rand_offset_x = None
+    rand_offset_y = None
+    while rand_offset_x is None or abs(rand_offset_x) > camera_max_x:
+        rand_offset_x = random.gauss(sigma=camera_max_x/2)
+    while rand_offset_y is None or abs(rand_offset_y) > camera_max_y:
+        rand_offset_y = random.gauss(sigma=camera_max_y/2)
 
-def randomize_camera_specs():
-    pass
+    camera.location = default_camera_pos + Vector((rand_offset_x, rand_offset_y, 0))
+    
 
-def adjust_camera_angle():
-    pass
+def randomize_camera_specs(camera, camera_config: CameraConfig):
+    camera_min_focal_len = camera_config.camera_min_focal_length
+    camera_max_focal_len = camera_config.camera_max_focal_length
+    mu = camera_min_focal_len + ((camera_max_focal_len - camera_min_focal_len) / 2)
+    sigma = (camera_max_focal_len - camera_min_focal_len) / 4
+    camera_focal_len = None
+
+    while camera_focal_len is None or abs(camera_focal_len) > camera_max_focal_len or abs(camera_focal_len) < camera_min_focal_len:
+        camera_focal_len = random.gauss(mu, sigma)
+
+    camera.lens = camera_focal_len
+
+    
+def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y):
+    camera_pos = camera.location
+
+    corners = compute_corners(Vector, projection_screen, screen_points_pos_y)
+    center = sum(corners) / len(corners)
+
+    direction = center - camera_pos
+
+    # Aligns rotation as quaternion s.t. camera view points in direction of center of projection_screen
+    rotation = direction.to_track_quat("-Z", "Y").to_euler()
+    camera.rotation_euler = rotation
+
+    return corners, center
+    
+
+def compute_corners(Vector, projection_screen, screen_points_pos_y):
+    # bbox corners as world coords
+    corners = [
+        projection_screen.matrix_world @ Vector(corner)
+        for corner in projection_screen.bound_box
+    ]
+
+    # Get either max or min Y coords; max if screen points in positive y direction, min when in negative y direction
+    # Note: Works only if aligned with XZ; no rotation appliedd to screen
+    if (screen_points_pos_y):
+        y = max(corner.y for corner in corners) 
+    else:
+        y = min(corner.y for corner in corners)
+
+    # Select only those vertices with the same y component
+    selected_corners = [
+        corner for corner in corners
+        if abs(corner.y - y) < 1e-6
+    ]
+
+    return selected_corners
+
+
+def randomize_camera_rotation(
+    Vector,
+    Euler,
+    camera,
+    corners,
+    alpha=0.05,
+    roll_factor=0.3
+):
+    # Calculate screen center
+    center = sum(corners, Vector()) / len(corners)
+
+    # Distance from camera to screen
+    distance = (center - camera.location).length
+
+    # Calculate screen diagonal (maximum distance between corners)
+    diagonal = max(
+        (a - b).length
+        for a in corners
+        for b in corners
+    )
+
+    # Calculate angular screen size
+    screen_angle = math.atan(diagonal / (2 * distance))
+
+    # Calculate vertical field of view
+    focal_length = camera.data.lens
+    sensor_height = camera.data.sensor_height
+
+    fov = 2 * math.atan(sensor_height / (2 * focal_length))
+
+    # Determine angular standard deviation
+    sigma = alpha * min(screen_angle, fov / 2)
+
+    # Sample Gaussian noise
+    noise_x = random.gauss(0, sigma)
+    noise_y = random.gauss(0, sigma)
+    noise_z = random.gauss(0, sigma * roll_factor)
+
+    # Convert noise into a quaternion
+    noise_rotation = Euler(
+        (noise_x, noise_y, noise_z),
+        'XYZ'
+    ).to_quaternion()
+
+    # Apply noise to the ideal rotation
+    ideal_rotation = camera.rotation_euler.to_quaternion()
+
+    camera.rotation_mode = 'QUATERNION'
+    camera.rotation_quaternion = ideal_rotation @ noise_rotation
+
 
 def randomize_slide():
     pass
 
-import numpy as np
-def randomize_slide_pos(slide_obj, offset_x, offset_z):
-    # First, find slide position:
-    slide_x = 0
-    slide_z = 0
-    # Then, randomize x offset and y offset
-    
 
+def randomize_slide_pos(Vector, slide_obj, max_offset_x, max_offset_z):
+
+    slide_position = slide_obj.location
+    offset_x = random.uniform(-max_offset_x, max_offset_x)
+    offset_z = random.uniform(-max_offset_z, max_offset_z)
+
+    slide_obj.position = slide_position + Vector((offset_x, 0, offset_z))
+    
 
 def place_slide_on_whiteboard(
     bpy: Any,
@@ -793,7 +919,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
     projects annotations, applies degradation, and writes per-split annotation JSON plus generation_config
     metadata."""
     config.validate()
-    bpy, Vector, (Matrix, _) = _require_blender()
+    bpy, Vector, Euler, (Matrix, _) = _require_blender()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     source_root = config.slide_source_dir.expanduser()
     slides = discover_slides(source_root, cache_path=config.output_dir / ".slide_discovery.json")
