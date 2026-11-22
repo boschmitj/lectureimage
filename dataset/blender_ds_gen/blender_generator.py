@@ -39,11 +39,11 @@ class EnvironmentConfig:
 @dataclass
 class UniversityLectureHallConfig(EnvironmentConfig):
     # no change in y direction
-    background_max_x = 3.9
-    background_max_z = 0.759
-    camera_max_y = 8
-    camera_max_x = 13.5
-    slide_points_positive_y = True
+    background_max_x: float = 3.9
+    background_max_z: float = 0.759
+    camera_max_y: float = 8.0
+    camera_max_x: float = 13.5
+    slide_points_positive_y: bool = True
 
 @dataclass
 class CameraConfig:
@@ -324,20 +324,26 @@ def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str
 
     image_node.image = image
 
+    return projection_plane
 
-def randomize_camera(bpy: Any, Vector: Any, Euler: Any, camera_config: CameraConfig, projection_screen_name: str, camera_name: str, camera_max_x, camera_max_y, screen_points_pos_y):
+
+def randomize_camera(bpy: Any, Vector: Any, Euler: Any, camera_config: CameraConfig, projection_screen, camera_name: str, env_config):
 
     camera = bpy.data.objects.get(camera_name)
     # Use scene camera as fallback
     if camera is None:
         camera = bpy.context.scene.camera
 
-    projection_screen = bpy.data.objects.get(projection_screen_name)
+    camera_max_x = env_config.camera_max_x
+    camera_max_y = env_config.camera_max_y
+    screen_points_pos_y = env_config.slide_points_positive_y
 
     randomize_camera_pos(Vector, camera, camera_max_x, camera_max_y)
     randomize_camera_specs(camera, camera_config)
-    adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y)
-    randomize_camera_rotation(Vector, Euler, camera, )
+    corners, center = adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y)
+    randomize_camera_rotation(Vector, Euler, camera, corners, center)
+
+    return corners
 
     
 def randomize_camera_pos(Vector, camera, camera_max_x, camera_max_y):
@@ -408,12 +414,10 @@ def randomize_camera_rotation(
     Euler,
     camera,
     corners,
+    center,
     alpha=0.05,
     roll_factor=0.3
 ):
-    # Calculate screen center
-    center = sum(corners, Vector()) / len(corners)
-
     # Distance from camera to screen
     distance = (center - camera.location).length
 
@@ -453,18 +457,69 @@ def randomize_camera_rotation(
     camera.rotation_mode = 'QUATERNION'
     camera.rotation_quaternion = ideal_rotation @ noise_rotation
 
+def alter_environment(
+        bpy: Any,
+        Vector,
+        Euler, 
+        camera_config: CameraConfig,
+        env_config: EnvironmentConfig,
+        generator_config: GeneratorConfig,
+        image_path: str,
+        ):
 
-def randomize_slide():
-    pass
+    projection_plane = place_slide_on_image(bpy, image_path, generator_config.proj_screen_name)
+    randomize_slide_pos(Vector, projection_plane, env_config)
+    corners = randomize_camera(
+        bpy,
+        Vector,
+        Euler,
+        camera_config,
+        projection_plane,
+        generator_config.camera_name,
+        env_config,
+    )
+
+    return corners
 
 
-def randomize_slide_pos(Vector, slide_obj, max_offset_x, max_offset_z):
+def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos):
+    projection_plane.position = projection_plane_pos
+    camera.position = camera_pos
+
+
+def randomize_slide_pos(Vector, slide_obj, env_config):
+
+    max_offset_x = env_config.background_max_x
+    max_offset_z = env_config.background_max_z
 
     slide_position = slide_obj.location
     offset_x = random.uniform(-max_offset_x, max_offset_x)
     offset_z = random.uniform(-max_offset_z, max_offset_z)
 
     slide_obj.position = slide_position + Vector((offset_x, 0, offset_z))
+
+
+def take_image(bpy, config: GeneratorConfig, corners, camera, world_to_camera_view):
+
+    scene = bpy.context.scene
+
+    pixel_coords = []
+    visibility = []
+
+    for corner in corners:
+        co_2d = world_to_camera_view(scene, camera, corner)
+
+        x = co_2d.x * config.width
+        y = (1- co_2d.y) * config.height
+
+        if co_2d.x > 1 or co_2d.y > 1:
+            visibility.append(0)
+        else:
+            visibility.append(1)
+
+        pixel_coords.append((round(x), round(y)))
+
+    return pixel_coords, visibility
     
 
 def place_slide_on_whiteboard(
@@ -919,7 +974,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
     projects annotations, applies degradation, and writes per-split annotation JSON plus generation_config
     metadata."""
     config.validate()
-    bpy, Vector, Euler, (Matrix, _) = _require_blender()
+    bpy, Vector, Euler, (Matrix, world_to_camera_view) = _require_blender()
     config.output_dir.mkdir(parents=True, exist_ok=True)
     source_root = config.slide_source_dir.expanduser()
     slides = discover_slides(source_root, cache_path=config.output_dir / ".slide_discovery.json")
@@ -935,6 +990,10 @@ def generate_dataset(config: GeneratorConfig) -> None:
     split_by_slide = {slide.slide_id: split for split, records in splits.items() for slide in records}
     annotations: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     assignments = _environment_assignments(selected, environments, config.seed)
+    camera_config = CameraConfig()
+
+    # TODO: Later change this
+    env_config = UniversityLectureHallConfig()
 
     for environment, environment_samples in assignments.items():
         if not environment_samples:
@@ -946,35 +1005,56 @@ def generate_dataset(config: GeneratorConfig) -> None:
         bpy.ops.wm.open_mainfile(filepath=str(environment), load_ui=False)
         _set_render_settings(bpy.context.scene, config)
         room_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
-        room_center, room_size = _bounds_center(room_objects, Vector)
-        reference_name, max_slide_width = _environment_surface_reference(environment, config.whiteboard_name)
-        whiteboard = _find_whiteboard(bpy, Vector, reference_name)
-        surface = _surface_for_object(whiteboard, Vector, room_center)
+        # room_center, room_size = _bounds_center(room_objects, Vector)
+        # reference_name, max_slide_width = _environment_surface_reference(environment, config.whiteboard_name)
+        # whiteboard = _find_whiteboard(bpy, Vector, reference_name)
+        # surface = _surface_for_object(whiteboard, Vector, room_center)
         missing_textures = _missing_texture_paths(bpy)
 
+        camera = bpy.data.objects.get(config.camera_name)
+        projection_screen = bpy.data.objects.get(config.proj_screen_name)
+
+        camera_base_position = camera.location
+        projection_screen_base_position = projection_screen.location
+
         for sample_index, slide, sample_seed in environment_samples:
-            _remove_generated_sample_objects(bpy)
-            state = RuntimeState(config, random.Random(sample_seed), source_root, environment)
-            state.whiteboard = whiteboard
-            state.surface = surface
-            state.slide, state.slide_corners = place_slide_on_whiteboard(
-                bpy,
-                Vector,
-                state.surface,
-                source_root / slide.source_path,
-                state.rng,
-                max_width=max_slide_width,
-            )
-            state.human_objects = _append_human(bpy, Vector, config.human_model)
-            _place_human(bpy, Vector, Matrix, state, room_center, room_size)
-            state.material_metadata = _randomize_materials(
-                bpy, state.rng, {state.slide.data.materials[0].name}
-            )
-            camera = _configure_camera(bpy, Vector, state, room_center, room_size)
-            split = split_by_slide[slide.slide_id]
-            render_path = config.output_dir / "images" / split / f"sample_{sample_index:06d}.png"
-            render_path.parent.mkdir(parents=True, exist_ok=True)
-            bpy.context.scene.render.filepath = str(render_path)
+            reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position)
+            corners = alter_environment(bpy,
+                              Vector,
+                              Euler,
+                              camera_config,
+                              env_config,
+                              config,
+                              source_root / slide.source_path)
+            pixel_coords, visibility = take_image(bpy,
+                       config,
+                       corners,
+                       camera,
+                       world_to_camera_view)
+
+            
+            # _remove_generated_sample_objects(bpy)
+            # state = RuntimeState(config, random.Random(sample_seed), source_root, environment)
+            # state.whiteboard = whiteboard
+            # state.surface = surface
+            # state.slide, state.slide_corners = place_slide_on_whiteboard(
+            #     bpy,
+            #     Vector,
+            #     state.surface,
+            #     source_root / slide.source_path,
+            #     state.rng,
+            #     max_width=max_slide_width,
+            # )
+            # state.human_objects = _append_human(bpy, Vector, config.human_model)
+            # _place_human(bpy, Vector, Matrix, state, room_center, room_size)
+            # state.material_metadata = _randomize_materials(
+            #     bpy, state.rng, {state.slide.data.materials[0].name}
+            # )
+            # camera = _configure_camera(bpy, Vector, state, room_center, room_size)
+            # split = split_by_slide[slide.slide_id]
+            # render_path = config.output_dir / "images" / split / f"sample_{sample_index:06d}.png"
+            # render_path.parent.mkdir(parents=True, exist_ok=True)
+            # bpy.context.scene.render.filepath = str(render_path)
             annotation = {
                 "image": render_path.name,
                 "width": config.width,
