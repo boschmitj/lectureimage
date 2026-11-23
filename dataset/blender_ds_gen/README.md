@@ -89,6 +89,7 @@ Available options:
   (default: `BLENDER_EEVEE_NEXT`)
 - `--texture-limit` — texture pixel limit (default: 2048)
 - `--no-render-simplify` — disable render simplification
+- `--debug` — print debug progress information
 
 The default render profile uses Eevee Next, 32 render samples (TAA render
 samples capped at 16 for Eevee Next), render simplification with subdivision and
