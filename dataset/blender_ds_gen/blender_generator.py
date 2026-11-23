@@ -69,6 +69,7 @@ class GeneratorConfig:
     texture_limit: int = 2048
     proj_screen_name = "ProjectionScreen"
     camera_name = "DatasetCamera"
+    debug: bool = False
 
     def validate(self) -> None:
         if self.samples < 0 or self.width <= 0 or self.height <= 0:
@@ -94,6 +95,12 @@ def _require_blender() -> tuple[Any, Any, Any]:
     except ImportError as exc:
         raise RuntimeError("Run scene generation with Blender's Python interpreter") from exc
     return bpy, Vector, Euler, (Matrix, world_to_camera_view)
+
+
+def _debug(config: GeneratorConfig, *args: Any) -> None:
+    """Print debug information only when ``config.debug`` is enabled."""
+    if config.debug:
+        print("[debug]", *args, flush=True)
 
 
 def _world_bounds(obj: Any, Vector: Any) -> tuple[Any, Any]:
@@ -150,7 +157,7 @@ def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str
         if node.type == "TEX_IMAGE"
     )
     image = bpy.data.images.load(
-        image_path,
+        str(image_path),
         check_existing=True
     )
 
@@ -200,14 +207,14 @@ def randomize_camera_specs(camera, camera_config: CameraConfig):
     while camera_focal_len is None or abs(camera_focal_len) > camera_max_focal_len or abs(camera_focal_len) < camera_min_focal_len:
         camera_focal_len = random.gauss(mu, sigma)
 
-    camera.lens = camera_focal_len
+    camera.data.lens = camera_focal_len
 
     
 def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y):
     camera_pos = camera.location
 
     corners = compute_corners(Vector, projection_screen, screen_points_pos_y)
-    center = sum(corners) / len(corners)
+    center = sum(corners, Vector()) / len(corners)
 
     direction = center - camera_pos
 
@@ -455,20 +462,41 @@ def generate_dataset(config: GeneratorConfig) -> None:
     config.validate()
     bpy, Vector, Euler, (Matrix, world_to_camera_view) = _require_blender()
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    _debug(
+        config,
+        "generate_dataset started",
+        "output_dir=", config.output_dir,
+        "slide_source_dir=", config.slide_source_dir,
+        "samples=", config.samples,
+        "seed=", config.seed,
+        "render_engine=", config.render_engine,
+        "render_samples=", config.render_samples,
+        "debug=", config.debug,
+    )
     source_root = config.slide_source_dir.expanduser()
     slides = discover_slides(source_root, cache_path=config.output_dir / ".slide_discovery.json")
+    _debug(config, "discovered", len(slides), "slides from", source_root)
     if not slides:
         source_root = config.output_dir / "_placeholder_slides"
         create_placeholder_slides(source_root / "part0" / "group0" / "placeholder_deck", seed=config.seed)
         slides = discover_slides(source_root)
+        _debug(config, "generated placeholders, discovered", len(slides), "slides")
     if not slides:
         raise RuntimeError("No readable slides were found or generated")
     environments = discover_environments(config, bpy)
+    _debug(config, "found", len(environments), "environments")
     splits = split_by_deck(slides, train=config.train_ratio, validation=config.val_ratio, test=config.test_ratio, seed=config.seed)
+    _debug(
+        config,
+        "splits:",
+        {name: len(records) for name, records in splits.items()},
+    )
     selected = sample_slides(slides, config.samples, seed=config.seed)
+    _debug(config, "selected", len(selected), "slides for rendering")
     split_by_slide = {slide.slide_id: split for split, records in splits.items() for slide in records}
     annotations: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     assignments = _environment_assignments(selected, environments, config.seed)
+    _debug(config, "environment assignments:", {str(e): len(s) for e, s in assignments.items() if s})
     camera_config = CameraConfig(
         width=config.width,
         height=config.height,
@@ -497,8 +525,32 @@ def generate_dataset(config: GeneratorConfig) -> None:
             raise ValueError(f"Projection screen {config.proj_screen_name!r} was not found")
         camera_base_position = camera.location.copy()
         projection_screen_base_position = projection_screen.location.copy()
+        _debug(
+            config,
+            "environment",
+            environment.name,
+            "camera=",
+            config.camera_name,
+            "screen=",
+            config.proj_screen_name,
+            "base_camera_pos=",
+            tuple(round(c, 4) for c in camera_base_position),
+            "base_screen_pos=",
+            tuple(round(c, 4) for c in projection_screen_base_position),
+        )
 
         for sample_index, slide, _sample_seed in environment_samples:
+            _debug(
+                config,
+                "sample",
+                sample_index,
+                "slide=",
+                slide.slide_id,
+                "source=",
+                slide.source_path,
+                "split=",
+                split_by_slide[slide.slide_id],
+            )
             reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position)
             corners = alter_environment(bpy,
                               Vector,
@@ -523,6 +575,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
             render_path.parent.mkdir(parents=True, exist_ok=True)
             bpy.context.scene.render.filepath = str(render_path)
             bpy.ops.render.render(write_still=True)
+            _debug(config, "rendered sample", sample_index, "to", render_path)
 
             original_image_path = (source_root / slide.source_path).resolve()
             annotations[split].append({
@@ -532,10 +585,13 @@ def generate_dataset(config: GeneratorConfig) -> None:
                 "visibility": visibility,
             })
 
+    _debug(config, "annotation counts:", {name: len(v) for name, v in annotations.items()})
     for split, values in annotations.items():
         path = config.output_dir / "annotations" / f"{split}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+        _debug(config, "wrote annotations", path, "(", len(values), "entries)")
+    _debug(config, "generate_dataset complete")
 
 
 def _parse_args(argv: Iterable[str]) -> GeneratorConfig:
@@ -561,6 +617,7 @@ def _parse_args(argv: Iterable[str]) -> GeneratorConfig:
     )
     parser.add_argument("--texture-limit", type=int, default=2048)
     parser.add_argument("--no-render-simplify", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="print debug progress information")
     args = parser.parse_args(list(argv))
     return GeneratorConfig(
         slide_source_dir=args.slide_source_dir,
@@ -580,6 +637,7 @@ def _parse_args(argv: Iterable[str]) -> GeneratorConfig:
         render_engine=args.render_engine,
         texture_limit=args.texture_limit,
         simplify_render=not args.no_render_simplify,
+        debug=args.debug,
     )
 
 
