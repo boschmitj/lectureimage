@@ -29,31 +29,38 @@ python -m pip install -r requirements.txt
 
 ## Blender generation
 
-The generator consumes finished classroom environments; it does not construct
-rooms, furniture, lights, or cameras. It reuses the camera and lights already
-stored in each environment and creates only one generated slide plane and one
-appended human model per sample.
+The generator adapts an already-built classroom environment at render time; it
+does not construct rooms, furniture, lights, or cameras, and it creates no new
+objects. Each environment must contain a camera (an object named
+`DatasetCamera`, falling back to the scene camera) and a mesh object named
+`ProjectionScreen` whose active node-based material uses a `TEX_IMAGE`
+texture node. If either is missing, generation fails with a clear error.
+
+For every sample the generator loads the slide PNG into the screen's existing
+texture node, jitters the screen's position around its base location, randomizes
+the camera (Gaussian position offset around its base location, a Gaussian focal
+length between 24 and 50 mm, aim at the screen center, plus small rotation
+jitter), renders one frame, then resets the screen and camera to their base
+positions before the next sample. No acceptance/rejection checks are performed
+on camera placement or slide framing.
 
 Samples are assigned to environments before rendering. Environments are then
 processed sequentially: each `.blend` file is opened once, all assigned samples
-are rendered, generated slide/human objects are removed between samples, and
-only then is the next environment opened. No environments are processed in
-parallel.
+are rendered, the screen and camera are reset between samples, and only then is
+the next environment opened. No environments are processed in parallel.
 
-Run the complete generator in Blender 5.2.2:
+Run the generator in Blender:
 
 ```bash
 blender --background classroom_environment.blend --python blender_generator.py -- \
   --slide-source-dir /home/josh/Documents/Datasets/slide_dataset/Raw \
   --environment-dir /home/josh/Documents/Datasets/slide_dataset/environments \
-  --human-model /home/josh/Documents/Datasets/slide_dataset/models/Human+body/Human.humanbody.blend \
   --output-dir dataset --samples 100 --seed 12345
 ```
 
 Use `--environment-file` instead of `--environment-dir` to pin a single
 environment. If neither is supplied, the `.blend` file opened by Blender is
-used. The human-model path has a compatibility fallback for the commonly
-distributed nested path `Human+body/Human/humanbody.blend`.
+used.
 
 ```bash
 blender --background --python blender_generator.py -- \
@@ -62,33 +69,46 @@ blender --background --python blender_generator.py -- \
   --samples 1
 ```
 
-The generator detects a mesh named like `whiteboard`, `blackboard`, `screen`, or
-`projection`, identifies its largest vertical planar face, and places the
-slide directly in front of that face while preserving its aspect ratio. Use
-`--whiteboard-name` when automatic detection is ambiguous. It randomizes the
-existing node-based materials, appends the human model, and samples the
-existing camera. If an environment has no camera, one camera is created for
-that environment; no additional lights are created. Camera candidates use a
-4-10 m whiteboard distance, +/-3 m horizontal offset, 1.2-2.0 m floor-relative
-height, +/-20° yaw, +/-10° pitch, +/-3° roll, and a 24-50 mm focal length. A
-candidate is accepted only when the camera is inside the room, on the
-presentation side, geometrically clear, and all four slide corners are inside
-the image. Slide area and classroom context are not used as rejection
-criteria.
-For faster camera-like images, the default render profile uses Eevee Next, one-to-sixteen Eevee render samples, render
-simplification with subdivision and child particles disabled, and a 2048-pixel
-texture limit. Select `--render-engine CYCLES` or `--no-render-simplify` only
-when higher fidelity is required.
-Annotations include the four geometric slide corners, independent corner
-visibility, environment, camera and human metadata, missing texture paths, and
-the original slide metadata. If the source directory has no valid images,
-placeholder slides are generated automatically.
+Available options:
+
+- `--slide-source-dir` — directory of validated slides (default: the packaged
+  `DEFAULT_SLIDE_SOURCE_DIR`)
+- `--environment-dir` — directory of `.blend` environments (mutually exclusive
+  with `--environment-file`)
+- `--environment-file` — single `.blend` environment to render
+- `--output-dir` — output directory (default: `dataset`)
+- `--samples` — number of samples to render (default: 100)
+- `--width` / `--height` — render resolution (default: 1920×1080)
+- `--seed` — random seed (default: 42)
+- `--train-ratio` / `--val-ratio` / `--test-ratio` — deck split ratios
+  (default: 0.8 / 0.1 / 0.1)
+- `--camera-min-focal-length` / `--camera-max-focal-length` — focal length
+  bounds in mm (default: 24 / 50)
+- `--render-samples` — render samples (default: 32)
+- `--render-engine` — `BLENDER_EEVEE_NEXT`, `BLENDER_EEVEE`, or `CYCLES`
+  (default: `BLENDER_EEVEE_NEXT`)
+- `--texture-limit` — texture pixel limit (default: 2048)
+- `--no-render-simplify` — disable render simplification
+
+The default render profile uses Eevee Next, 32 render samples (TAA render
+samples capped at 16 for Eevee Next), render simplification with subdivision and
+child particles disabled, ambient occlusion enabled, and a 2048-pixel texture
+limit. Select `--render-engine CYCLES` or `--no-render-simplify` only when
+higher fidelity is required.
+
+Annotations include the rendered image path, the original slide path, the four
+projected slide-corner pixel coordinates, and per-corner visibility. Rendered
+images go to `output_dir/images/{split}/` and annotations to
+`output_dir/annotations/{split}.json` for `train`, `val`, and `test`. Samples
+are drawn from the full slide pool and each image is filed under the split
+assigned to its slide deck. If the source directory has no valid images,
+placeholder slides are generated automatically so the pipeline can run
+end-to-end.
 
 The first run validates every source image and may take a few minutes for a
 large dataset. Progress is printed during discovery and rendering. A
 `.slide_discovery.json` cache is written inside the output directory so later
-runs skip image decoding when the source file list and timestamps are
-unchanged.
+runs skip image decoding when the source file list and timestamps are unchanged.
 
 The Blender module is intentionally import-safe outside Blender; only
 `generate_dataset` requires `bpy`.
