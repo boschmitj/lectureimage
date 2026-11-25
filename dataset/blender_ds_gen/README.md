@@ -118,3 +118,4 @@ The Blender module is intentionally import-safe outside Blender; only
 The lighting/environment looks very differently when comparing material preview and rendered view.
 Worse, material preview looks "more correct", with realistic lighting enabled. In Blender, 
 check under the dropdown menu next to the shading viewport if discabling `Scene World` changes anything. If so, copy the path to the HDRI selector (find it via e.g. `find /usr /home -name "forest.exr" 2>/dev/null`). THen, in the shading tab, select `World` instead of `Object`, add new node Texture -> Environment Texture, select as image the .exr found previously. This solves the issue regarding differences in material preview or the rendering being unnatural. One could take this a step further and randomize the world lighting to add more variance to the taken images.
+Then connect the Color Fields of the new node and the existing Background node.
