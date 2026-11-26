@@ -35,8 +35,12 @@ class EnvironmentConfig:
 @dataclass
 class UniversityLectureHallConfig(EnvironmentConfig):
     # no change in y direction
-    background_max_x: float = 3.9
-    background_max_z: float = 0.759
+    # Screen box: center (0, -5.67535, 2.60699), dims X=9.35636m, Z=3.20332m
+    # Max offsets are half-dims so the screen stays within the box.
+    background_max_x: float = 4.67818
+    background_max_z: float = 1.60166
+    # Z offset from slide center to screen center (screen center is higher Z)
+    screen_slide_z_offset: float = 0.14
     camera_max_y: float = 8.0
     camera_max_x: float = 13.5
     slide_points_positive_y: bool = True
@@ -213,6 +217,7 @@ def randomize_camera_specs(camera, camera_config: CameraConfig):
 def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y):
     camera_pos = camera.location
 
+    bpy.context.view_layer.update()
     corners = compute_corners(Vector, projection_screen, screen_points_pos_y)
     center = sum(corners, Vector()) / len(corners)
 
@@ -321,26 +326,60 @@ def alter_environment(
     return corners
 
 
-def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos):
+def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos, projection_plane_scale):
     projection_plane.location = projection_plane_pos
+    projection_plane.scale = projection_plane_scale
     camera.location = camera_pos
 
 
 def randomize_slide_pos(Vector, slide_obj, env_config):
 
+    base_position = slide_obj.location.copy()
+    base_dimensions = slide_obj.dimensions.copy()
+    aspect = base_dimensions.x / base_dimensions.z if base_dimensions.z != 0 else 1.0
+
     max_offset_x = env_config.background_max_x
     max_offset_z = env_config.background_max_z
+    z_offset = env_config.screen_slide_z_offset
 
-    slide_position = slide_obj.location
-    offset_x = random.uniform(-max_offset_x, max_offset_x)
-    offset_z = random.uniform(-max_offset_z, max_offset_z)
+    min_dim_x = base_dimensions.x * 0.5
+    min_dim_z = base_dimensions.z * 0.5
 
-    slide_obj.location = slide_position + Vector((offset_x, 0, offset_z))
+    while True:
+        offset_x = random.uniform(-max_offset_x, max_offset_x)
+        offset_z = random.uniform(-max_offset_z, max_offset_z)
+
+        margin_x = max_offset_x - abs(offset_x)
+        margin_z = max_offset_z - abs(offset_z)
+        if margin_x <= 0 or margin_z <= 0:
+            continue
+
+        std_x = margin_x / 2
+        new_dim_x = random.gauss(base_dimensions.x, std_x)
+        if new_dim_x <= 0:
+            continue
+
+        new_dim_z = new_dim_x / aspect
+
+        if (new_dim_x >= min_dim_x and new_dim_z >= min_dim_z and
+                abs(offset_x) + new_dim_x / 2 <= max_offset_x and
+                abs(offset_z) + new_dim_z / 2 <= max_offset_z):
+            break
+
+    new_scale = Vector((
+        new_dim_x / base_dimensions.x if base_dimensions.x != 0 else 1.0,
+        1.0,
+        new_dim_z / base_dimensions.z if base_dimensions.z != 0 else 1.0
+    ))
+
+    slide_obj.location = base_position + Vector((offset_x, 0, offset_z + z_offset))
+    slide_obj.scale = new_scale
 
 
 def take_image(bpy, config: GeneratorConfig, corners, camera, world_to_camera_view):
 
     scene = bpy.context.scene
+    bpy.context.view_layer.update()
 
     pixel_coords = []
     visibility = []
@@ -525,6 +564,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
             raise ValueError(f"Projection screen {config.proj_screen_name!r} was not found")
         camera_base_position = camera.location.copy()
         projection_screen_base_position = projection_screen.location.copy()
+        projection_screen_base_scale = projection_screen.scale.copy()
         _debug(
             config,
             "environment",
@@ -551,7 +591,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
                 "split=",
                 split_by_slide[slide.slide_id],
             )
-            reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position)
+            reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position, projection_screen_base_scale)
             corners = alter_environment(bpy,
                               Vector,
                               Euler,
