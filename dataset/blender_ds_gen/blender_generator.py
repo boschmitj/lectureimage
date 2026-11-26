@@ -12,6 +12,7 @@ import json
 import math
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -151,7 +152,13 @@ def discover_environments(config: GeneratorConfig, bpy: Any) -> list[Path]:
         return [current]
     raise ValueError("Provide --environment-dir or --environment-file, or run with a .blend file")
 
-def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str) -> Any:
+def place_slide_on_image(
+    bpy: Any,
+    image_path: Path,
+    generator_config: GeneratorConfig,
+) -> tuple[Any, float]:
+
+    projection_screen_name = generator_config.proj_screen_name
 
     projection_plane = bpy.data.objects.get(projection_screen_name)
     material = projection_plane.active_material
@@ -166,8 +173,11 @@ def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str
     )
 
     image_node.image = image
+    image_width, image_height = image.size
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("Slide image must have positive dimensions")
 
-    return projection_plane
+    return projection_plane, image_width / image_height
 
 
 def randomize_camera(bpy: Any, Vector: Any, Euler: Any, camera_config: CameraConfig, projection_screen, camera_name: str, env_config):
@@ -311,8 +321,12 @@ def alter_environment(
         image_path: str,
         ):
 
-    projection_plane = place_slide_on_image(bpy, image_path, generator_config.proj_screen_name)
-    randomize_slide_pos(Vector, projection_plane, env_config)
+    projection_plane, image_aspect = place_slide_on_image(
+        bpy, image_path, generator_config
+    )
+    randomize_slide_pos(
+        Vector, projection_plane, env_config, generator_config, image_aspect
+    )
     corners = randomize_camera(
         bpy,
         Vector,
@@ -332,45 +346,49 @@ def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos
     camera.location = camera_pos
 
 
-def randomize_slide_pos(Vector, slide_obj, env_config):
+def randomize_slide_pos(
+    Vector,
+    slide_obj,
+    env_config,
+    generator_config: GeneratorConfig,
+    image_aspect: float,
+):
 
     base_position = slide_obj.location.copy()
     base_dimensions = slide_obj.dimensions.copy()
-    aspect = base_dimensions.x / base_dimensions.z if base_dimensions.z != 0 else 1.0
+    if image_aspect <= 0:
+        raise ValueError("Slide image aspect ratio must be positive")
 
     max_offset_x = env_config.background_max_x
     max_offset_z = env_config.background_max_z
     z_offset = env_config.screen_slide_z_offset
 
-    min_dim_x = base_dimensions.x * 0.5
-    min_dim_z = base_dimensions.z * 0.5
+    base_width = base_dimensions.x
+    base_height = base_dimensions.y
+    if base_width <= 0 or base_height <= 0:
+        raise ValueError("Projection screen must have positive dimensions")
+    min_dim_x = max(base_width * 0.5, base_height * 0.5 * image_aspect)
+    available_half_height = max_offset_z - abs(z_offset)
+    max_dim_x = min(2 * max_offset_x, 2 * available_half_height * image_aspect)
+    if max_offset_x <= 0 or max_offset_z <= 0 or min_dim_x > max_dim_x:
+        raise ValueError("Slide cannot fit within the configured screen bounds")
 
-    while True:
-        offset_x = random.uniform(-max_offset_x, max_offset_x)
-        offset_z = random.uniform(-max_offset_z, max_offset_z)
+    mode_dim_x = min(max(base_width, min_dim_x), max_dim_x)
+    new_dim_x = (
+        random.triangular(min_dim_x, max_dim_x, mode_dim_x)
+        if min_dim_x < max_dim_x
+        else min_dim_x
+    )
+    new_dim_z = new_dim_x / image_aspect
+    max_center_offset_x = max_offset_x - new_dim_x / 2
+    max_center_offset_z = available_half_height - new_dim_z / 2
+    offset_x = random.uniform(-max_center_offset_x, max_center_offset_x)
+    offset_z = random.uniform(-max_center_offset_z, max_center_offset_z)
 
-        margin_x = max_offset_x - abs(offset_x)
-        margin_z = max_offset_z - abs(offset_z)
-        if margin_x <= 0 or margin_z <= 0:
-            continue
-
-        std_x = margin_x / 2
-        new_dim_x = random.gauss(base_dimensions.x, std_x)
-        if new_dim_x <= 0:
-            continue
-
-        new_dim_z = new_dim_x / aspect
-
-        if (new_dim_x >= min_dim_x and new_dim_z >= min_dim_z and
-                abs(offset_x) + new_dim_x / 2 <= max_offset_x and
-                abs(offset_z) + new_dim_z / 2 <= max_offset_z):
-            break
-
-    new_scale = Vector((
-        new_dim_x / base_dimensions.x if base_dimensions.x != 0 else 1.0,
-        1.0,
-        new_dim_z / base_dimensions.z if base_dimensions.z != 0 else 1.0
-    ))
+    _debug(generator_config, "Selected slide config without rejection sampling")
+    new_scale = slide_obj.scale.copy()
+    new_scale.x *= new_dim_x / base_width
+    new_scale.y *= new_dim_z / base_height
 
     slide_obj.location = base_position + Vector((offset_x, 0, offset_z + z_offset))
     slide_obj.scale = new_scale
@@ -614,8 +632,18 @@ def generate_dataset(config: GeneratorConfig) -> None:
             ).resolve()
             render_path.parent.mkdir(parents=True, exist_ok=True)
             bpy.context.scene.render.filepath = str(render_path)
+            render_started = time.perf_counter()
             bpy.ops.render.render(write_still=True)
-            _debug(config, "rendered sample", sample_index, "to", render_path)
+            render_duration = time.perf_counter() - render_started
+            _debug(
+                config,
+                "rendered sample",
+                sample_index,
+                "in",
+                f"{render_duration:.2f}s",
+                "to",
+                render_path,
+            )
 
             original_image_path = (source_root / slide.source_path).resolve()
             annotations[split].append({
