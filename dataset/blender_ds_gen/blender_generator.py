@@ -226,16 +226,16 @@ def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_po
     
 
 def compute_corners(Vector, projection_screen, screen_points_pos_y):
-    # bbox corners as world coords
+    # Use actual mesh vertices instead of bound_box corners
     corners = [
-        projection_screen.matrix_world @ Vector(corner)
-        for corner in projection_screen.bound_box
+        projection_screen.matrix_world @ Vector(vertex.co)
+        for vertex in projection_screen.data.vertices
     ]
 
     # Get either max or min Y coords; max if screen points in positive y direction, min when in negative y direction
-    # Note: Works only if aligned with XZ; no rotation appliedd to screen
-    if (screen_points_pos_y):
-        y = max(corner.y for corner in corners) 
+    # Note: Works only if aligned with XZ; no rotation applied to screen
+    if screen_points_pos_y:
+        y = max(corner.y for corner in corners)
     else:
         y = min(corner.y for corner in corners)
 
