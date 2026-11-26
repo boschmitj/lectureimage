@@ -12,6 +12,7 @@ import json
 import math
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,8 +36,12 @@ class EnvironmentConfig:
 @dataclass
 class UniversityLectureHallConfig(EnvironmentConfig):
     # no change in y direction
-    background_max_x: float = 3.9
-    background_max_z: float = 0.759
+    # Screen box: center (0, -5.67535, 2.60699), dims X=9.35636m, Z=3.20332m
+    # Max offsets are half-dims so the screen stays within the box.
+    background_max_x: float = 4.67818
+    background_max_z: float = 1.60166
+    # Z offset from slide center to screen center (screen center is higher Z)
+    screen_slide_z_offset: float = 0.14
     camera_max_y: float = 8.0
     camera_max_x: float = 13.5
     slide_points_positive_y: bool = True
@@ -147,7 +152,13 @@ def discover_environments(config: GeneratorConfig, bpy: Any) -> list[Path]:
         return [current]
     raise ValueError("Provide --environment-dir or --environment-file, or run with a .blend file")
 
-def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str) -> Any:
+def place_slide_on_image(
+    bpy: Any,
+    image_path: Path,
+    generator_config: GeneratorConfig,
+) -> tuple[Any, float]:
+
+    projection_screen_name = generator_config.proj_screen_name
 
     projection_plane = bpy.data.objects.get(projection_screen_name)
     material = projection_plane.active_material
@@ -162,8 +173,11 @@ def place_slide_on_image(bpy: Any, image_path: Path, projection_screen_name: str
     )
 
     image_node.image = image
+    image_width, image_height = image.size
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("Slide image must have positive dimensions")
 
-    return projection_plane
+    return projection_plane, image_width / image_height
 
 
 def randomize_camera(bpy: Any, Vector: Any, Euler: Any, camera_config: CameraConfig, projection_screen, camera_name: str, env_config):
@@ -213,6 +227,7 @@ def randomize_camera_specs(camera, camera_config: CameraConfig):
 def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_pos_y):
     camera_pos = camera.location
 
+    bpy.context.view_layer.update()
     corners = compute_corners(Vector, projection_screen, screen_points_pos_y)
     center = sum(corners, Vector()) / len(corners)
 
@@ -226,16 +241,16 @@ def adjust_camera_angle(bpy, Vector, projection_screen, camera, screen_points_po
     
 
 def compute_corners(Vector, projection_screen, screen_points_pos_y):
-    # bbox corners as world coords
+    # Use actual mesh vertices instead of bound_box corners
     corners = [
-        projection_screen.matrix_world @ Vector(corner)
-        for corner in projection_screen.bound_box
+        projection_screen.matrix_world @ Vector(vertex.co)
+        for vertex in projection_screen.data.vertices
     ]
 
     # Get either max or min Y coords; max if screen points in positive y direction, min when in negative y direction
-    # Note: Works only if aligned with XZ; no rotation appliedd to screen
-    if (screen_points_pos_y):
-        y = max(corner.y for corner in corners) 
+    # Note: Works only if aligned with XZ; no rotation applied to screen
+    if screen_points_pos_y:
+        y = max(corner.y for corner in corners)
     else:
         y = min(corner.y for corner in corners)
 
@@ -306,8 +321,12 @@ def alter_environment(
         image_path: str,
         ):
 
-    projection_plane = place_slide_on_image(bpy, image_path, generator_config.proj_screen_name)
-    randomize_slide_pos(Vector, projection_plane, env_config)
+    projection_plane, image_aspect = place_slide_on_image(
+        bpy, image_path, generator_config
+    )
+    randomize_slide_pos(
+        Vector, projection_plane, env_config, generator_config, image_aspect
+    )
     corners = randomize_camera(
         bpy,
         Vector,
@@ -321,26 +340,64 @@ def alter_environment(
     return corners
 
 
-def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos):
+def reset_environment(projection_plane, camera, projection_plane_pos, camera_pos, projection_plane_scale):
     projection_plane.location = projection_plane_pos
+    projection_plane.scale = projection_plane_scale
     camera.location = camera_pos
 
 
-def randomize_slide_pos(Vector, slide_obj, env_config):
+def randomize_slide_pos(
+    Vector,
+    slide_obj,
+    env_config,
+    generator_config: GeneratorConfig,
+    image_aspect: float,
+):
+
+    base_position = slide_obj.location.copy()
+    base_dimensions = slide_obj.dimensions.copy()
+    if image_aspect <= 0:
+        raise ValueError("Slide image aspect ratio must be positive")
 
     max_offset_x = env_config.background_max_x
     max_offset_z = env_config.background_max_z
+    z_offset = env_config.screen_slide_z_offset
 
-    slide_position = slide_obj.location
-    offset_x = random.uniform(-max_offset_x, max_offset_x)
-    offset_z = random.uniform(-max_offset_z, max_offset_z)
+    base_width = base_dimensions.x
+    base_height = base_dimensions.y
+    if base_width <= 0 or base_height <= 0:
+        raise ValueError("Projection screen must have positive dimensions")
+    min_dim_x = max(base_width * 0.5, base_height * 0.5 * image_aspect)
+    available_half_height = max_offset_z - abs(z_offset)
+    max_dim_x = min(2 * max_offset_x, 2 * available_half_height * image_aspect)
+    if max_offset_x <= 0 or max_offset_z <= 0 or min_dim_x > max_dim_x:
+        raise ValueError("Slide cannot fit within the configured screen bounds")
 
-    slide_obj.location = slide_position + Vector((offset_x, 0, offset_z))
+    mode_dim_x = min(max(base_width, min_dim_x), max_dim_x)
+    new_dim_x = (
+        random.triangular(min_dim_x, max_dim_x, mode_dim_x)
+        if min_dim_x < max_dim_x
+        else min_dim_x
+    )
+    new_dim_z = new_dim_x / image_aspect
+    max_center_offset_x = max_offset_x - new_dim_x / 2
+    max_center_offset_z = available_half_height - new_dim_z / 2
+    offset_x = random.uniform(-max_center_offset_x, max_center_offset_x)
+    offset_z = random.uniform(-max_center_offset_z, max_center_offset_z)
+
+    _debug(generator_config, "Selected slide config without rejection sampling")
+    new_scale = slide_obj.scale.copy()
+    new_scale.x *= new_dim_x / base_width
+    new_scale.y *= new_dim_z / base_height
+
+    slide_obj.location = base_position + Vector((offset_x, 0, offset_z + z_offset))
+    slide_obj.scale = new_scale
 
 
 def take_image(bpy, config: GeneratorConfig, corners, camera, world_to_camera_view):
 
     scene = bpy.context.scene
+    bpy.context.view_layer.update()
 
     pixel_coords = []
     visibility = []
@@ -525,6 +582,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
             raise ValueError(f"Projection screen {config.proj_screen_name!r} was not found")
         camera_base_position = camera.location.copy()
         projection_screen_base_position = projection_screen.location.copy()
+        projection_screen_base_scale = projection_screen.scale.copy()
         _debug(
             config,
             "environment",
@@ -551,7 +609,7 @@ def generate_dataset(config: GeneratorConfig) -> None:
                 "split=",
                 split_by_slide[slide.slide_id],
             )
-            reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position)
+            reset_environment(projection_screen, camera, projection_screen_base_position, camera_base_position, projection_screen_base_scale)
             corners = alter_environment(bpy,
                               Vector,
                               Euler,
@@ -574,8 +632,18 @@ def generate_dataset(config: GeneratorConfig) -> None:
             ).resolve()
             render_path.parent.mkdir(parents=True, exist_ok=True)
             bpy.context.scene.render.filepath = str(render_path)
+            render_started = time.perf_counter()
             bpy.ops.render.render(write_still=True)
-            _debug(config, "rendered sample", sample_index, "to", render_path)
+            render_duration = time.perf_counter() - render_started
+            _debug(
+                config,
+                "rendered sample",
+                sample_index,
+                "in",
+                f"{render_duration:.2f}s",
+                "to",
+                render_path,
+            )
 
             original_image_path = (source_root / slide.source_path).resolve()
             annotations[split].append({
